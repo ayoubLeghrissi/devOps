@@ -5,12 +5,16 @@ package org.example;
 public class Main {
     public static void main(String[] args) {
         int nombre = 17;
+        aff_estPremier(nombre);
+
+    }
+    public static void aff_estPremier(int nombre) {
         if (estPremier(nombre)) {
             System.out.println(nombre + " est un nombre premier.");
-        } else {
+        }
+        else {
             System.out.println(nombre + " n'est pas un nombre premier.");
         }
-
     }
 
     public static boolean estPremier(int nombre) {
