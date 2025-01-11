@@ -26,13 +26,14 @@
 
     - name: install kubernetes & docker
       apt:
-        name:
-          - kubelet={{ kube_v }}
-          - kubeadm={{ kube_v }}
-          - kubectl={{ kube_v }}
-          - docker.io
+        name: "{{ item }}"
         state: present
         update_cache: yes
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+        - docker.io
 
     - name: Enable and start Docker
       service:
@@ -49,7 +50,7 @@
       - name: initialize kuber cluster
         shell: |
           kubeadm init \
-            --apiserver-advertise-address={{ ansible_facts['default_ipv4']['address'] }}
+            --apiserver-advertise-address=127.0.0.1
             --pod-network-cidr={{ pod_subnet }}
         register: kubeadm_init_output
         args:
