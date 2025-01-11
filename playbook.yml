@@ -1,0 +1,140 @@
+---
+  - name: Kubernetes Cluster Installation
+    hosts: ubuntu
+    vars:
+      kube_v: "1.20.0-00"
+    tasks:
+
+
+    - name: basic setup 
+      apt:
+        name: "{{ item }}"
+        update_cache: yes
+      loop:
+        - apt-transport-https
+        - curl
+
+    - name: Add the Kubernetes signing key
+      apt_key:
+        url: "https://packages.cloud.google.com/apt/doc/apt-key.gpg"
+        state: present
+
+    - name: Enable Kubernetes repo
+      apt_repository:
+        repo: "deb http://apt.kubernetes.io/ kubernetes-xenial main"
+        state: present
+
+    - name: install kubernetes & docker
+      apt:
+        name:
+          - kubelet={{ kube_v }}
+          - kubeadm={{ kube_v }}
+          - kubectl={{ kube_v }}
+          - docker.io
+        state: present
+        update_cache: yes
+
+    - name: Enable and start Docker
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+  - name: kubernetes master setup
+    hosts: master
+    vars:
+      pod_subnet: "172.16.0.0/16"
+    tasks:
+
+      - name: initialize kuber cluster
+        shell: |
+          kubeadm init \
+            --apiserver-advertise-address={{ ansible_facts['default_ipv4']['address'] }}
+            --pod-network-cidr={{ pod_subnet }}
+        register: kubeadm_init_output
+        args:
+          creates: "/etc/kubernetes/admin.conf"
+        
+
+      - name: extracting join token and CA cert hash
+        set_fact:
+          join_token: |
+            "{{ kubeadm_init_output.stdout | regex_search('--token \\S+') | regex_replace('--token ', '')}}"
+          discovery_token_ca_cert_hash: |
+            "{{ kubeadm_init_output.stdout | regex_search('--discovery-token-ca-cert-hash \\S+') | regex_replace('--discovery-token-ca-cert-hash ', '') }}"
+        
+      - name: print command to join for worker nodes
+        debug:
+          msg: |
+            To join worker nodes, run the following command:
+            kubeadm join {{ ansible_facts['default_ipv4']['address'] }}:6443 \
+            --token {{ join_token }} \
+            --discovery-token-ca-cert-hash sha256:{{ discovery_token_ca_cert_hash }}
+
+
+      - name: config kubectl for the user
+        shell: |
+          mkdir -p $HOME/.kube
+          cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+          chown $(id -u):$(id -g) $HOME/.kube/config
+        
+      - name: deploy Flannel overlay for exp
+        shell: |
+          kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+        
+
+      - name: waiting for master node to become ready
+        shell: |
+          kubectl get nodes --field-selector metadata.name=$(hostname) -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}'
+        register: master_node_status
+        until: master_node_status.stdout == "True"
+        retries: 10
+        delay: 30
+        ignore_errors: yes
+
+      - name: announce failing status if master is not ready
+        fail:
+          msg: |
+            "Master node is not in Ready state after 5 minutes. Check the cluster initialization logs."
+          when: master_node_status.stdout != "True"
+  
+  - name: joining worker nodes
+    hosts: workers
+    tasks:
+
+      - name: join the worker nodes to cluster
+        shell: |
+          kubeadm join {{ hostvars['master'].ansible_facts['default_ipv4']['address'] }}:6443 \
+            --token {{ hostvars['master'].join_token }} \
+            --discovery-token-ca-cert-hash sha256:{{ hostvars['master'].discovery_token_ca_cert_hash }}
+        when: 
+          - hostvars['master'].join_token is defined
+          - hostvars['master'].discovery_token_ca_cert_hash is defined
+
+  - name: verifying all nodes are ready
+    hosts: master
+    tasks:
+      - name: waiting for all nodes (workers esp.) to become ready
+        shell: |
+          kubectl get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' | grep -v "False"
+        register: nodes_status
+        until: nodes_status.stdout.split() | length == groups['all'] | length
+        retries: 10
+        delay: 30
+        ignore_errors: yes
+
+      - name: announce failing status if not all nodes are ready 
+        fail:
+          msg: "Not all nodes are in Ready state after 5 minutes. Check the cluster logs."
+        when: nodes_status.stdout.split() | length != groups['all'] | length
+
+      - name: print nodes status
+        shell: |
+          kubectl get nodes
+        register: node_list
+
+      - name: display the status
+        debug:
+          msg: "{{ node_list.stdout }}"
+
+   
